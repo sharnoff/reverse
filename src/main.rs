@@ -1,5 +1,6 @@
 use ansi_term::Color;
 use clap::{App, Arg};
+use glob::Pattern as GlobPattern;
 use regex::{Captures, Match, Regex};
 use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
@@ -57,6 +58,9 @@ struct Config {
     req_match: String,
     req_name_group: usize,
     req_version_group: usize,
+
+    #[serde(default)]
+    exclude: Vec<String>,
 }
 
 // Parses a config from the file
@@ -66,7 +70,7 @@ fn parse_config(config_path: &str, is_default_cfg_path: bool) -> Config {
         Ok((path, s))
     });
 
-    let (abs_path, file_str) = match str_res {
+    let (abs_config_path, file_str) = match str_res {
         Ok((path, s)) => (path, s),
         Err(e) => {
             match is_default_cfg_path {
@@ -78,13 +82,13 @@ fn parse_config(config_path: &str, is_default_cfg_path: bool) -> Config {
         }
     };
 
-    match toml::de::from_str(&file_str) {
+    let mut cfg: Config = match toml::de::from_str(&file_str) {
         Ok(cfg) => cfg,
         Err(e) => {
             match is_default_cfg_path {
                 true => eprintln!(
                     "Config parse error from '{}': {}",
-                    abs_path.to_string_lossy(),
+                    abs_config_path.to_string_lossy(),
                     e
                 ),
                 false => eprintln!("Config parse error: {}", e),
@@ -92,14 +96,28 @@ fn parse_config(config_path: &str, is_default_cfg_path: bool) -> Config {
 
             process::exit(1);
         }
+    };
+
+    // We'll localize all of the excludes to the directory that the config was in
+    //
+    // we can unwrap here because '/' will never be a file
+    let config_parent = abs_config_path.parent().unwrap();
+
+    for ex_path in cfg.exclude.iter_mut() {
+        let p: &Path = ex_path.as_ref();
+        if !p.is_absolute() {
+            *ex_path = config_parent.join(&ex_path).to_string_lossy().into();
+        }
     }
+
+    cfg
 }
 
 // The actual execution of the program, with minimal handling of user input
 //
 // If this function encounters a critical error, it uses `process::exit` to terminate the program
 fn run(config: Config, input_paths: Vec<&Path>, list_defs: bool, show_matches: bool) {
-    // Step 1: Validate regexes
+    // Step 1: Validate regexes and produce exclusion globs
 
     let def_matcher = match Regex::new(&config.def_match) {
         Ok(re) => re,
@@ -122,6 +140,22 @@ fn run(config: Config, input_paths: Vec<&Path>, list_defs: bool, show_matches: b
             process::exit(1);
         }
     };
+
+    let mut excludes_failed = false;
+    let mut excludes = Vec::new();
+    for abs_path in &config.exclude {
+        match GlobPattern::new(abs_path) {
+            Ok(g) => excludes.push(g),
+            Err(e) => {
+                eprintln!("Invalid glob {:?}: {}", abs_path, e);
+                excludes_failed = true;
+            }
+        }
+    }
+
+    if excludes_failed {
+        process::exit(1);
+    }
 
     // Step 2: Set up file queue(s)
     //
@@ -164,6 +198,11 @@ fn run(config: Config, input_paths: Vec<&Path>, list_defs: bool, show_matches: b
     let mut reqs = HashMap::new();
 
     while let Some(p) = path_queue.pop() {
+        // Skip this path if it matches an exclude glob:
+        if excludes.iter().any(|g| g.matches(&p.to_string_lossy())) {
+            continue;
+        }
+
         // First, we'll check what kind of filesystem object we have here:
         let meta = match fs::metadata(&p) {
             Ok(m) => m,
