@@ -18,8 +18,16 @@ fn main() {
         .about("A fine-grained intra-project version-tracking tool")
         .arg(Arg::with_name("INPUT").multiple(true))
         .arg(Arg::with_name("config").long("config").takes_value(true))
-        // .arg(Arg::with_name("list-defs").long("list-defs"))
-        // .arg(Arg::with_name("show-matches").long("show-matches"))
+        .arg(
+            Arg::with_name("list-defs")
+                .long("list-defs")
+                .conflicts_with("show-matches"),
+        )
+        .arg(
+            Arg::with_name("show-matches")
+                .long("show-matches")
+                .conflicts_with("list-defs"),
+        )
         .get_matches();
 
     let (config_path, is_default_cfg_path) = match matches.value_of("config") {
@@ -35,9 +43,9 @@ fn main() {
         Some(vs) => vs.map(|s| s.as_ref()).collect::<Vec<_>>(),
     };
 
-    // let list_defs = matches.is_present("list-defs");
-    // let show_matches = matches.is_present("show-matches");
-    run(config, input_paths);
+    let list_defs = matches.is_present("list-defs");
+    let show_matches = matches.is_present("show-matches");
+    run(config, input_paths, list_defs, show_matches);
 }
 
 // The config, as it's parsed from a user's file
@@ -90,7 +98,7 @@ fn parse_config(config_path: &str, is_default_cfg_path: bool) -> Config {
 // The actual execution of the program, with minimal handling of user input
 //
 // If this function encounters a critical error, it uses `process::exit` to terminate the program
-fn run(config: Config, input_paths: Vec<&Path>) {
+fn run(config: Config, input_paths: Vec<&Path>, list_defs: bool, show_matches: bool) {
     // Step 1: Validate regexes
 
     let def_matcher = match Regex::new(&config.def_match) {
@@ -182,8 +190,41 @@ fn run(config: Config, input_paths: Vec<&Path>) {
                 }
             }
         } else if meta.is_file() {
-            process_file(&config, &def_matcher, &req_matcher, p, &mut defs, &mut reqs);
+            process_file(
+                &config,
+                &def_matcher,
+                &req_matcher,
+                p,
+                &mut defs,
+                &mut reqs,
+                show_matches,
+            );
         }
+    }
+
+    // Step 3.1:
+    //
+    // Show definitions or matches:
+    // The matches will have already been done in `process_file`, but we'll show the definitions
+    if list_defs {
+        for def in defs.values().flatten() {
+            def.pretty_print();
+        }
+    }
+
+    // If we listed the definitions or showed matches, we'll exit without checking for any errors.
+    //
+    // There's a little bit of work here in order to produce a correct info message:
+    if list_defs || show_matches {
+        let flag_str = match (list_defs, show_matches) {
+            (true, true) => "flags '--list-defs' and '--show-matches' were enabled",
+            (true, false) => "flag '--list-defs' was enabled",
+            (false, true) => "flag '--show-matches' was enabled",
+            (false, false) => unreachable!(),
+        };
+
+        eprintln!("Warning: No errors checked because {}", flag_str);
+        process::exit(0);
     }
 
     // Step 4: Check for conflicts and emit errors if there are any
@@ -246,6 +287,7 @@ fn process_file(
     path: PathBuf,
     defs: &mut HashMap<String, Vec<Definition>>,
     reqs: &mut HashMap<String, Vec<Requirement>>,
+    show_matches: bool,
 ) {
     // First, we'll attempt to read the file:
     let file_str = match fs::read(&path).map(String::from_utf8) {
@@ -290,6 +332,10 @@ fn process_file(
         let line_no = i + 1;
 
         if let Some(cs) = def_matcher.captures(line) {
+            if show_matches {
+                pretty_print_match(&cs, &path, line_no, line, "definition");
+            }
+
             // We're okay to grab index 0 because it's always guaranteed to be the whole match
             let src = source(line, line_no, cs.get(0).unwrap());
             let name = cs
@@ -313,6 +359,10 @@ fn process_file(
 
         // And once more for the requirements
         if let Some(cs) = req_matcher.captures(line) {
+            if show_matches {
+                pretty_print_match(&cs, &path, line_no, line, "requirement");
+            }
+
             let src = source(line, line_no, cs.get(0).unwrap());
             let name = cs
                 .get(config.req_name_group)
@@ -333,6 +383,32 @@ fn process_file(
             reqs.insert(name.into(), req_list);
         }
     }
+}
+
+fn pretty_print_match(
+    cs: &Captures,
+    path: &Path,
+    line_no: usize,
+    line_str: &str,
+    match_type: &str,
+) {
+    // The way we'll pretty print a match is by giving the file, line number, and then the full
+    // line, with the region of the match highlighted in red.
+    let match_range = cs.get(0).unwrap().range();
+
+    let pre_str = &line_str[..match_range.start];
+    let match_str = Color::Red.paint(&line_str[match_range.clone()]);
+    let post_str = &line_str[match_range.end..];
+
+    eprintln!(
+        "{}:{}:{}: {}{}{}",
+        path.to_string_lossy(),
+        line_no,
+        match_type,
+        pre_str,
+        match_str,
+        post_str,
+    );
 }
 
 // @require foo v0.1
@@ -360,6 +436,13 @@ impl Definition {
         }
 
         eprintln!("{}", s);
+    }
+
+    fn pretty_print(&self) {
+        eprintln!(
+            "Definition {{ name: {}, version: {} }}",
+            self.name, self.version
+        );
     }
 }
 
