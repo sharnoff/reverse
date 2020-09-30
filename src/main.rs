@@ -255,14 +255,11 @@ fn run(config: Config, input_paths: Vec<&Path>, list_defs: bool, show_matches: b
     //
     // There's a little bit of work here in order to produce a correct info message:
     if list_defs || show_matches {
-        let flag_str = match (list_defs, show_matches) {
-            (true, true) => "flags '--list-defs' and '--show-matches' were enabled",
-            (true, false) => "flag '--list-defs' was enabled",
-            (false, true) => "flag '--show-matches' was enabled",
-            (false, false) => unreachable!(),
-        };
-
-        eprintln!("Warning: No errors checked because {}", flag_str);
+        if list_defs && defs.is_empty() {
+            eprintln!("no definitions found");
+        } else if show_matches && (defs.is_empty() && reqs.is_empty()) {
+            eprintln!("no matches found");
+        }
         process::exit(0);
     }
 
