@@ -19,14 +19,17 @@ fn main() {
         .about("A fine-grained intra-project version-tracking tool")
         .arg(Arg::with_name("INPUT").multiple(true))
         .arg(Arg::with_name("config").long("config").takes_value(true))
+        .arg(Arg::with_name("quiet").long("quiet"))
         .arg(
             Arg::with_name("list-defs")
                 .long("list-defs")
+                .conflicts_with("quiet")
                 .conflicts_with("show-matches"),
         )
         .arg(
             Arg::with_name("show-matches")
                 .long("show-matches")
+                .conflicts_with("quiet")
                 .conflicts_with("list-defs"),
         )
         .get_matches();
@@ -46,7 +49,8 @@ fn main() {
 
     let list_defs = matches.is_present("list-defs");
     let show_matches = matches.is_present("show-matches");
-    run(config, input_paths, list_defs, show_matches);
+    let quiet = matches.is_present("quiet");
+    run(config, input_paths, quiet, list_defs, show_matches);
 }
 
 // The config, as it's parsed from a user's file
@@ -116,7 +120,7 @@ fn parse_config(config_path: &str, is_default_cfg_path: bool) -> Config {
 // The actual execution of the program, with minimal handling of user input
 //
 // If this function encounters a critical error, it uses `process::exit` to terminate the program
-fn run(config: Config, input_paths: Vec<&Path>, list_defs: bool, show_matches: bool) {
+fn run(config: Config, input_paths: Vec<&Path>, quiet: bool, list_defs: bool, show_matches: bool) {
     // Step 1: Validate regexes and produce exclusion globs
 
     let def_matcher = match Regex::new(&config.def_match) {
@@ -263,6 +267,11 @@ fn run(config: Config, input_paths: Vec<&Path>, list_defs: bool, show_matches: b
         process::exit(0);
     }
 
+    if !quiet && defs.is_empty() && reqs.is_empty() {
+        eprintln!("no matches found");
+        process::exit(0);
+    }
+
     // Step 4: Check for conflicts and emit errors if there are any
     //
     // First, we'll check we don't have two definitions for the same name
@@ -283,15 +292,48 @@ fn run(config: Config, input_paths: Vec<&Path>, list_defs: bool, show_matches: b
         process::exit(1);
     }
 
+    // We'll group the definitions with the requirements that use them, so that we can give better
+    // formatting when displaying
+    let mut sets = defs
+        .into_iter()
+        .map(|(name, def)| (name, (def, Vec::new())))
+        .collect::<HashMap<_, _>>();
+
     for req in reqs.values().flatten() {
-        match defs.get(&req.name) {
-            None => req.print_unknown_name(),
-            Some(def) => {
-                if &def.version != &req.version {
-                    req.print_version_mismatch(def);
-                }
+        match sets.get_mut(&req.name) {
+            None => {
+                req.print_unknown_name();
+                exit = true;
             }
+            Some((_, ref mut reqs)) => reqs.push(req),
         }
+    }
+
+    if exit {
+        process::exit(1);
+    }
+
+    for (def, reqs) in sets.values() {
+        if !quiet {
+            let n_passed = reqs.iter().filter(|r| r.version == def.version).count();
+            let color = match () {
+                () if reqs.is_empty() => WARN_COLOR,
+                () if n_passed == reqs.len() => PASS_COLOR,
+                () => ERR_COLOR,
+            };
+
+            eprintln!(
+                "{} -> {}",
+                def.name,
+                color.paint(format!("{}/{}", n_passed, reqs.len()))
+            );
+        }
+
+        reqs.iter().for_each(|req| {
+            if req.version != def.version {
+                req.print_version_mismatch(def);
+            }
+        });
     }
 }
 
@@ -450,6 +492,8 @@ fn pretty_print_match(
 // @require foo v0.1
 const ERR_COLOR: Color = Color::Red;
 const CTX_COLOR: Color = Color::Blue;
+const WARN_COLOR: Color = Color::Yellow;
+const PASS_COLOR: Color = Color::Green;
 
 // @def foo v0.2
 impl Definition {
