@@ -319,7 +319,10 @@ fn run(config: Config, input_paths: Vec<&Path>, quiet: bool, list_defs: bool, sh
             let color = match () {
                 () if reqs.is_empty() => WARN_COLOR,
                 () if n_passed == reqs.len() => PASS_COLOR,
-                () => ERR_COLOR,
+                () => {
+                    exit = true;
+                    ERR_COLOR
+                }
             };
 
             eprintln!(
@@ -332,8 +335,13 @@ fn run(config: Config, input_paths: Vec<&Path>, quiet: bool, list_defs: bool, sh
         reqs.iter().for_each(|req| {
             if req.version != def.version {
                 req.print_version_mismatch(def);
+                exit = true;
             }
         });
+    }
+
+    if exit {
+        process::exit(1);
     }
 }
 
