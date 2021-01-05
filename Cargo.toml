@@ -3,7 +3,8 @@ name = "reverse"
 version = "0.1.0"
 authors = ["sharnoff <github@max.sharnoff.org>"]
 edition = "2018"
-description = "A fine-grained intra-project version-tracking tool"
+# @def "reverse description" v1
+description = "A fine-grained intra-project tool for maintaining internal consistency"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 

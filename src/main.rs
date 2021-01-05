@@ -16,22 +16,129 @@ fn main() {
     let matches = App::new("reverse")
         .version("0.1.0")
         .author("Max Sharnoff <reverse@max.sharnoff.org>")
-        .about("A fine-grained intra-project version-tracking tool")
-        .arg(Arg::with_name("INPUT").multiple(true))
-        .arg(Arg::with_name("config").long("config").takes_value(true))
-        .arg(Arg::with_name("quiet").long("quiet"))
+        // @req "reverse description" v1
+        .about("A fine-grained intra-project tool for maintaining internal consistency")
+        .arg(
+            Arg::with_name("INPUT")
+                .multiple(true)
+                .help("Provides the input files to search")
+                .long_help(concat!(
+                    "Provides the input files to search. Searching is recursive, and\n",
+                    "excludes any files matching the exclude list from the configuration.\n",
+                    "If no input paths are given, the default path is the current directory.\n",
+                )),
+        )
+        .arg(
+            Arg::with_name("config")
+                .long("config")
+                .takes_value(true)
+                .help("Optionally sets the configuration file to use")
+                .long_help(concat!(
+                    "Optionally sets the configuration file to use. If not provided,\n",
+                    "this defaults to 'reverse.toml' in the current directory",
+                )),
+        )
+        .arg(
+            Arg::with_name("quiet")
+                .long("quiet")
+                .help("suppresses output, exiting with 1 to indicate failure")
+                .long_help(concat!(
+                    "Suppresses output, exiting with 1 to indicate failure.\n",
+                    "This may be particularly useful part of a git pre-commit hook, for\n",
+                    "example so that internal version matching is guaranteed",
+                )),
+        )
         .arg(
             Arg::with_name("list-defs")
                 .long("list-defs")
+                .help("lists all of the matches for definitions in the searched files")
+                .long_help(concat!(
+                    "lists all of the matches for definitions in the searched files.\n",
+                    "See also: `--show-matches`",
+                ))
                 .conflicts_with("quiet")
                 .conflicts_with("show-matches"),
         )
         .arg(
             Arg::with_name("show-matches")
                 .long("show-matches")
+                .help("displays every instance of a match for any pattern")
                 .conflicts_with("quiet")
                 .conflicts_with("list-defs"),
         )
+        .after_help(concat!(
+            "Information about configuration:\n",
+            "\n",
+            "By default, `reverse` searches in the current directory for a configuration file,\n",
+            "specifially at 'reverse.toml'. This can be set with the `--config` flag. As might be\n",
+            "evident by the name, this is expected to be a TOML file, with a few different fields.\n",
+            "If you're new to this tool, don't worry yet about what these fields correspond to.\n",
+            "\n",
+            // @req "config field names" v0
+            "     | field name        | type     | purpose                                    \n",
+            "     |-------------------|----------|--------------------------------------------\n",
+            "     | def_match         | string   | The regex used to match on definitions     \n",
+            "     | def_name_group    | integer  | The group index of matches from `def_match`\n",
+            "     |                   |          | to use for the unique definition name.     \n",
+            "     | def_version_group | integer  | The group index from `def_match` to provide\n",
+            "     |                   |          | the version of the definition, as a string \n",
+            "     | req_match         | string   | Same as `def_match`, but for requirements  \n",
+            "     | req_name_group    | integer  | Same as `def_name_group`, but for          \n",
+            "     |                   |          | requirements                               \n",
+            "     | req_version_group | integer  | Same as `def_version_group`, but for       \n",
+            "     |                   |          | requirements                               \n",
+            "     | exclude           | [string] | This optional list of patterns gives a set \n",
+            "     |                   |          | of paths to exclude from searching.        \n",
+            "\n",
+            "This tool is fairly simple; it recursively searches all of the files/directories\n",
+            "supplied to it (defaulting to the current directory), and finds all occurences of\n",
+            "'definitions' and 'requirements'. These are both simply `(name, version)` pairs,\n",
+            "where all requirements must the same version as the original definition.\n",
+            "\n",
+            "The fields described above essentially give the instructions for finding these\n",
+            "definitions and requirements, alongside their version names.\n",
+            "\n",
+            "\n",
+            "Sample configuration:\n",
+            "\n",
+            "For Rust projects, I find a configuration like the following works well:\n",
+            "\n",
+            "    def_match         = '''@def\\s*([^\\s]+|\"[^\"]*\")\\s*(v[\\d\\.]+)'''\n",
+            "    def_name_group    = 1\n",
+            "    def_version_group = 2\n",
+            "    req_match         = '''@req\\s*([^\\s]+|\"[^\"]*\")\\s*(v[\\d\\.]+)'''\n",
+            "    req_name_group    = 1\n",
+            "    req_version_group = 2\n",
+            "    exclude           = [\"target\", \".git\"]\n",
+            "\n",
+            "where definitions are given by (in a code comment):\n",
+            // This trips up normal 'reverse' runs on the repo, so we'll add a little '@req' just
+            // to keep it happy:
+            //     @req foo v0.0.1
+            "   // @def foo v0.0.1\n",
+            "or:\n",
+            "   // @def \"longer foo bar\" v0.0.1\n",
+            "and requirements are given exactly the same way, except with `@req` replacing\n",
+            "`@def`.\n",
+            "\n",
+            "\n",
+            "Sample usage in a git pre-commit hook:\n",
+            "\n",
+            "Because it's mentioned above in the description for `--quiet`, it's worth showing\n",
+            "how `reverse` can be used as part of a pre-commit hook. Here's one, for example:\n",
+            "\n",
+            "    #!/bin/sh\n",
+            "\n",
+            "    dir=$(git rev-parse --show-toplevel)\n",
+            "\n",
+            "    # Check that there's no internal version mismatches\n",
+            "    reverse --quiet --config=\"$dir/reverse.toml\"\n",
+            "    if [ \"$?\" -ne \"0\" ]; then\n",
+            "        exit 1\n",
+            "    fi\n",
+            "\n",
+            "    # Otherwise, continue on with the hook script...\n",
+        ))
         .get_matches();
 
     let (config_path, is_default_cfg_path) = match matches.value_of("config") {
@@ -54,6 +161,7 @@ fn main() {
 }
 
 // The config, as it's parsed from a user's file
+// @def "config field names" v0
 #[derive(Debug, Deserialize)]
 struct Config {
     def_match: String,
@@ -497,13 +605,11 @@ fn pretty_print_match(
     );
 }
 
-// @require foo v0.1
 const ERR_COLOR: Color = Color::Red;
 const CTX_COLOR: Color = Color::Blue;
 const WARN_COLOR: Color = Color::Yellow;
 const PASS_COLOR: Color = Color::Green;
 
-// @def foo v0.2
 impl Definition {
     fn print_conflict(name: &str, defs: &[Definition]) {
         assert!(!defs.is_empty());
@@ -534,7 +640,6 @@ impl Definition {
     }
 }
 
-// @def bar v3
 impl Requirement {
     fn print_unknown_name(&self) {
         eprintln!(
@@ -574,7 +679,6 @@ impl Requirement {
     }
 }
 
-// @def bar v0
 impl Source {
     fn required_indent(&self) -> usize {
         self.line_no.to_string().len()
