@@ -66,6 +66,12 @@ fn main() {
                 .conflicts_with("quiet")
                 .conflicts_with("list-defs"),
         )
+        .arg(
+            Arg::with_name("strict")
+                .long("strict")
+                .short("s")
+                .help("exits with an error code if a warning is matched")
+        )
         .after_help(concat!(
             "Information about configuration:\n",
             "\n",
@@ -74,7 +80,7 @@ fn main() {
             "evident by the name, this is expected to be a TOML file, with a few different fields.\n",
             "If you're new to this tool, don't worry yet about what these fields correspond to.\n",
             "\n",
-            // @req "config field names" v0
+            // @req "config field names" v1
             "     | field name        | type     | purpose                                    \n",
             "     |-------------------|----------|--------------------------------------------\n",
             "     | def_match         | string   | The regex used to match on definitions     \n",
@@ -87,6 +93,8 @@ fn main() {
             "     |                   |          | requirements                               \n",
             "     | req_version_group | integer  | Same as `def_version_group`, but for       \n",
             "     |                   |          | requirements                               \n",
+            "     | warn_match        | string   | An optional regex to warn on if neither    \n",
+            "     |                   |          | 'def' nor 'req' match.                     \n",
             "     | exclude           | [string] | This optional list of patterns gives a set \n",
             "     |                   |          | of paths to exclude from searching.        \n",
             "\n",
@@ -109,7 +117,8 @@ fn main() {
             "    req_match         = '''@req\\s*([^\\s]+|\"[^\"]*\")\\s*(v[\\d\\.]+)'''\n",
             "    req_name_group    = 1\n",
             "    req_version_group = 2\n",
-            "    exclude           = [\"target\", \".git\"]\n",
+            "    warn_match        = '''@(req|def)'''\n",
+            "    exclude           = [\"target\", \".git\", \"reverse.toml\"]\n",
             "\n",
             "where definitions are given by (in a code comment):\n",
             // This trips up normal 'reverse' runs on the repo, so we'll add a little '@req' just
@@ -132,7 +141,7 @@ fn main() {
             "    dir=$(git rev-parse --show-toplevel)\n",
             "\n",
             "    # Check that there's no internal version mismatches\n",
-            "    reverse --quiet --config=\"$dir/reverse.toml\"\n",
+            "    reverse --quiet --strict --config=\"$dir/reverse.toml\"\n",
             "    if [ \"$?\" -ne \"0\" ]; then\n",
             "        exit 1\n",
             "    fi\n",
@@ -157,11 +166,12 @@ fn main() {
     let list_defs = matches.is_present("list-defs");
     let show_matches = matches.is_present("show-matches");
     let quiet = matches.is_present("quiet");
-    run(config, input_paths, quiet, list_defs, show_matches);
+    let strict = matches.is_present("strict");
+    run(config, input_paths, quiet, list_defs, show_matches, strict);
 }
 
 // The config, as it's parsed from a user's file
-// @def "config field names" v0
+// @def "config field names" v1
 #[derive(Debug, Deserialize)]
 struct Config {
     def_match: String,
@@ -170,6 +180,7 @@ struct Config {
     req_match: String,
     req_name_group: usize,
     req_version_group: usize,
+    warn_match: Option<String>,
 
     #[serde(default)]
     exclude: Vec<String>,
@@ -228,30 +239,32 @@ fn parse_config(config_path: &str, is_default_cfg_path: bool) -> Config {
 // The actual execution of the program, with minimal handling of user input
 //
 // If this function encounters a critical error, it uses `process::exit` to terminate the program
-fn run(config: Config, input_paths: Vec<&Path>, quiet: bool, list_defs: bool, show_matches: bool) {
+fn run(
+    config: Config,
+    input_paths: Vec<&Path>,
+    quiet: bool,
+    list_defs: bool,
+    show_matches: bool,
+    strict: bool,
+) {
     // Step 1: Validate regexes and produce exclusion globs
 
-    let def_matcher = match Regex::new(&config.def_match) {
-        Ok(re) => re,
-        Err(e) => {
-            eprintln!(
-                "Failed to compile `def_match` {:?}: {}",
-                &config.def_match, e
-            );
-            process::exit(1);
+    fn make_regex(string: &str, field: &str) -> Regex {
+        match Regex::new(string) {
+            Ok(re) => re,
+            Err(e) => {
+                eprintln!("Failed to compile `{}` {:?}: {}", field, string, e);
+                process::exit(1);
+            }
         }
-    };
+    }
 
-    let req_matcher = match Regex::new(&config.req_match) {
-        Ok(re) => re,
-        Err(e) => {
-            eprintln!(
-                "Failed to compile `req_match` {:?}: {}",
-                &config.def_match, e
-            );
-            process::exit(1);
-        }
-    };
+    let def_matcher = make_regex(&config.def_match, "def_match");
+    let req_matcher = make_regex(&config.req_match, "req_match");
+    let warn_matcher = config
+        .warn_match
+        .as_ref()
+        .map(|s| make_regex(s.as_str(), "warn_match"));
 
     let mut excludes_failed = false;
     let mut excludes = Vec::new();
@@ -345,10 +358,13 @@ fn run(config: Config, input_paths: Vec<&Path>, quiet: bool, list_defs: bool, sh
                 &config,
                 &def_matcher,
                 &req_matcher,
+                warn_matcher.as_ref(),
                 p,
                 &mut defs,
                 &mut reqs,
                 show_matches,
+                quiet,
+                strict,
             );
         }
     }
@@ -474,14 +490,18 @@ struct Requirement {
 }
 
 // Reads a file, adding it to the list
+// TODO: This should use a `RegexSet` instead of multiple, individual regexes.
 fn process_file(
     config: &Config,
     def_matcher: &Regex,
     req_matcher: &Regex,
+    warn_matcher: Option<&Regex>,
     path: PathBuf,
     defs: &mut HashMap<String, Vec<Definition>>,
     reqs: &mut HashMap<String, Vec<Requirement>>,
     show_matches: bool,
+    quiet: bool,
+    strict: bool,
 ) {
     // First, we'll attempt to read the file:
     let file_str = match fs::read(&path).map(String::from_utf8) {
@@ -525,6 +545,9 @@ fn process_file(
     for (i, line) in file_str.lines().enumerate() {
         let line_no = i + 1;
 
+        let mut matched_def = false;
+        let mut matched_req = false;
+
         if let Some(cs) = def_matcher.captures(line) {
             if show_matches {
                 pretty_print_match(&cs, &path, line_no, line, "definition");
@@ -549,6 +572,7 @@ fn process_file(
                 version: String::from(version),
             });
             defs.insert(name.into(), def_list);
+            matched_def = true;
         }
 
         // And once more for the requirements
@@ -575,6 +599,22 @@ fn process_file(
                 version: String::from(version),
             });
             reqs.insert(name.into(), req_list);
+            matched_req = true;
+        }
+
+        if let Some(m) = warn_matcher.and_then(|m| m.find(line)) {
+            if !matched_req && !matched_def {
+                if !quiet {
+                    let src = source(line, line_no, m);
+                    let indent = src.required_indent();
+                    let color = if strict { ERR_COLOR } else { WARN_COLOR };
+                    eprintln!("{}", src.display_with_indent(indent, color));
+                }
+
+                if strict {
+                    process::exit(1);
+                }
+            }
         }
     }
 }
@@ -626,7 +666,7 @@ impl Definition {
             name
         );
         for def in defs {
-            writeln!(&mut s, "{}", def.src.display_with_indent(indent)).unwrap();
+            writeln!(&mut s, "{}", def.src.display_with_indent(indent, ERR_COLOR)).unwrap();
         }
 
         eprintln!("{}", s);
@@ -668,13 +708,13 @@ impl Requirement {
             def.version,
             self.version,
             // 2nd line(s)
-            self.src.display_with_indent(indent),
+            self.src.display_with_indent(indent, ERR_COLOR),
             // 3rd line
             indent_str,
             CTX_COLOR.paint("= note:"),
             def.name,
             // 4th line(s)
-            def.src.display_with_indent(indent),
+            def.src.display_with_indent(indent, ERR_COLOR),
         );
     }
 }
@@ -684,7 +724,11 @@ impl Source {
         self.line_no.to_string().len()
     }
 
-    fn display_with_indent<'a>(&'a self, indent: usize) -> impl 'a + Display {
+    fn display_with_indent<'a>(
+        &'a self,
+        indent: usize,
+        highlight_color: Color,
+    ) -> impl 'a + Display {
         struct SourceDisplay<'b> {
             line: &'b str,
             line_no_str: String,
@@ -693,6 +737,7 @@ impl Source {
             col: usize,
             highlight_start_width: usize,
             highlight_end_width: usize,
+            highlight_color: Color,
         }
 
         impl<'b> Display for SourceDisplay<'b> {
@@ -725,7 +770,7 @@ impl Source {
                     self.indent,
                     CTX_COLOR.paint("|"),
                     highlight_pre,
-                    ERR_COLOR.paint(highlight),
+                    self.highlight_color.paint(highlight),
                     // 3nd line width
                     width = self.indent.len(),
                 )
@@ -746,12 +791,14 @@ impl Source {
             col,
             highlight_start_width,
             highlight_end_width,
+            highlight_color,
         }
     }
 }
 
 impl Display for Source {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
-        self.display_with_indent(self.required_indent()).fmt(f)
+        self.display_with_indent(self.required_indent(), ERR_COLOR)
+            .fmt(f)
     }
 }
