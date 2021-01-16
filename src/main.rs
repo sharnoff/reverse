@@ -604,7 +604,7 @@ fn process_file(
 
         if let Some(m) = warn_matcher.and_then(|m| m.find(line)) {
             if !matched_req && !matched_def {
-                if !quiet {
+                if !quiet || strict {
                     let src = source(line, line_no, m);
                     let indent = src.required_indent();
                     let color = if strict { ERR_COLOR } else { WARN_COLOR };
