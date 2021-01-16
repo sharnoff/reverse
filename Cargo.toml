@@ -5,6 +5,8 @@ authors = ["sharnoff <github@max.sharnoff.org>"]
 edition = "2018"
 # @def "reverse description" v1
 description = "A fine-grained intra-project tool for maintaining internal consistency"
+# @def "reverse repo url" v0
+repository = "https://github.com/sharnoff/reverse"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 

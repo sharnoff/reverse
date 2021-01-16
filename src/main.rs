@@ -1,5 +1,5 @@
 use ansi_term::Color;
-use clap::{App, Arg};
+use clap::{App, AppSettings, Arg, ArgMatches, SubCommand};
 use glob::Pattern as GlobPattern;
 use regex::{Captures, Match, Regex};
 use serde::Deserialize;
@@ -56,21 +56,47 @@ fn main() {
                     "lists all of the matches for definitions in the searched files.\n",
                     "See also: `--show-matches`",
                 ))
-                .conflicts_with("quiet")
-                .conflicts_with("show-matches"),
+                .conflicts_with_all(&["quiet", "show-matches"]),
         )
         .arg(
             Arg::with_name("show-matches")
                 .long("show-matches")
                 .help("displays every instance of a match for any pattern")
-                .conflicts_with("quiet")
-                .conflicts_with("list-defs"),
+                .conflicts_with_all(&["quiet", "list-defs"]),
         )
         .arg(
             Arg::with_name("strict")
                 .long("strict")
                 .short("s")
                 .help("exits with an error code if a warning is matched")
+        )
+        // The 'init' subcommand shouldn't take other arguments from above
+        .setting(AppSettings::ArgsNegateSubcommands)
+        .subcommand(
+            SubCommand::with_name("init")
+                .about("Initializes a 'reverse.toml' for a project")
+                .arg(
+                    Arg::with_name("DIR")
+                        .takes_value(true)
+                        .help("Provides a directory to initialze into")
+                )
+                .arg(
+                    Arg::with_name("filename")
+                        .short("f")
+                        .long("filename")
+                        .takes_value(true)
+                        .help("Sets the name of the file to write to, within the directory")
+                        .long_help(concat!(
+                            "Sets the name of the file to write to, within the directory. Defaults\n",
+                            "to 'reverse.toml'."
+                        ))
+                )
+                .arg(
+                    Arg::with_name("lang")
+                        .long("lang")
+                        .takes_value(true)
+                        .help("Load the configuration from a language preset"),
+                )
         )
         .after_help(concat!(
             "Information about configuration:\n",
@@ -150,6 +176,11 @@ fn main() {
         ))
         .get_matches();
 
+    if let Some(init_matches) = matches.subcommand_matches("init") {
+        run_init(init_matches);
+        return;
+    }
+
     let (config_path, is_default_cfg_path) = match matches.value_of("config") {
         Some(path) => (path, false),
         None => ("reverse.toml", true),
@@ -168,6 +199,82 @@ fn main() {
     let quiet = matches.is_present("quiet");
     let strict = matches.is_present("strict");
     run(config, input_paths, quiet, list_defs, show_matches, strict);
+}
+
+fn run_init(matches: &ArgMatches) {
+    macro_rules! config_fmt {
+        () => {
+            concat! {
+                // @req "reverse repo url" v0
+                "# Configuration for `reverse`: https://github.com/sharnoff/reverse\n",
+                "def_match         = '''@def\\s*([^\\s]+|\"[^\"]*\")\\s*(v[\\d\\.]+)'''\n",
+                "def_name_group    = 1\n",
+                "def_version_group = 2\n",
+                "req_match         = '''@req\\s*([^\\s]+|\"[^\"]*\")\\s*(v[\\d\\.]+)'''\n",
+                "req_name_group    = 1\n",
+                "req_version_group = 2\n",
+                "warn_match        = '''@(req|def)'''\n",
+                "exclude           = [\".git\", \"reverse.toml\"{}]\n",
+            }
+        };
+    }
+
+    #[rustfmt::skip]
+    static LANG_CONFIGS: &[(&str, &[&str], &str)] = &[
+        ("Rust", &["rs", "rust"], ", \"target\""),
+        ("Python", &["py", "python"], ", \".__pycache__\""),
+    ];
+
+    let path = Path::new(matches.value_of("DIR").unwrap_or("."))
+        .join(matches.value_of("filename").unwrap_or("reverse.toml"));
+
+    let extra_exclude = match matches.value_of("lang") {
+        None => "",
+        Some(lang) => {
+            // Search for the language with the given name/abbreviation
+            let matched_lang = LANG_CONFIGS
+                .iter()
+                .find(|(_, abs, _)| abs.iter().any(|&a| a == lang));
+
+            match matched_lang {
+                Some((_, _, exclude)) => exclude,
+                None => {
+                    // Print an error message with descriptive information about available
+                    // languages, alongside suggestions for adding a new one.
+                    eprintln!(
+                        "No language found for name '{}'. The available options are listed below:",
+                        lang
+                    );
+
+                    for (lang, aliases, _) in LANG_CONFIGS.iter() {
+                        let mut alias_str = aliases[0].to_owned();
+                        aliases[1..].iter().for_each(|a| {
+                            alias_str.push_str(", ");
+                            alias_str.push_str(a);
+                        });
+
+                        eprintln!("  {}: {}", lang, alias_str);
+                    }
+
+                    eprintln!(concat!(
+                        "If you'd like to add a language, just open an issue on the repository at:",
+                        // @req "reverse repo url" v0
+                        "https://github.com/sharnoff/reverse"
+                    ));
+
+                    process::exit(1);
+                }
+            }
+        }
+    };
+
+    match std::fs::write(&path, format!(config_fmt!(), extra_exclude)) {
+        Ok(()) => (),
+        Err(e) => {
+            eprintln!("failed to write config to {:?}: {}", path, e);
+            process::exit(1);
+        }
+    }
 }
 
 // The config, as it's parsed from a user's file
