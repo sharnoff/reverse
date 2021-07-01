@@ -68,7 +68,7 @@ fn main() {
             Arg::with_name("strict")
                 .long("strict")
                 .short("s")
-                .help("exits with an error code if a warning is matched")
+                .help("exits with an error code if a warning is matched or a definition is unused")
         )
         // The 'init' subcommand shouldn't take other arguments from above
         .setting(AppSettings::ArgsNegateSubcommands)
@@ -540,6 +540,16 @@ fn run(
         }
     }
 
+    // If we're in strict mode, emit an error if there are any unused definitions
+    if strict {
+        for (def, reqs) in sets.values() {
+            if reqs.is_empty() {
+                def.print_err_no_reqs();
+                exit = true;
+            }
+        }
+    }
+
     if exit {
         process::exit(1);
     }
@@ -783,6 +793,29 @@ impl Definition {
         eprintln!(
             "Definition {{ name: {}, version: {} }}",
             self.name, self.version
+        );
+    }
+}
+
+impl Definition {
+    fn print_err_no_reqs(&self) {
+        let indent = self.src.required_indent();
+        let indent_str = " ".repeat(indent);
+
+        eprintln!(
+            concat!(
+                "{} Unused definition '{}'\n",
+                "{}\n",
+                "{} {} this is an error due to the `--strict` flag\n",
+            ),
+            // 1st line
+            ERR_COLOR.paint("[error]"),
+            self.name,
+            // 2nd line
+            self.src.display_with_indent(indent, ERR_COLOR),
+            // 3rd line
+            indent_str,
+            CTX_COLOR.paint("= note:"),
         );
     }
 }
