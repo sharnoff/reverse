@@ -4,11 +4,12 @@ use glob::Pattern as GlobPattern;
 use regex::{Captures, Match, Regex};
 use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
+use std::env;
 use std::fmt::Write;
 use std::fmt::{self, Display, Formatter};
 use std::fs;
 use std::ops::Range;
-use std::path::{Path, PathBuf};
+use std::path::{self, Path, PathBuf};
 use std::process;
 use unicode_width::UnicodeWidthStr;
 
@@ -207,10 +208,10 @@ fn run_init(matches: &ArgMatches) {
             concat! {
                 // @req "reverse repo url" v0
                 "# Configuration for `reverse`: https://github.com/sharnoff/reverse\n",
-                "def_match         = '''@def\\s*([^\\s]+|\"[^\"]*\")\\s*(v[\\d\\.]+)'''\n",
+                "def_match         = '''@def\\s*(\"[^\"]*\")\\s*(v[\\d\\.]+)'''\n",
                 "def_name_group    = 1\n",
                 "def_version_group = 2\n",
-                "req_match         = '''@req\\s*([^\\s]+|\"[^\"]*\")\\s*(v[\\d\\.]+)'''\n",
+                "req_match         = '''@req\\s*(\"[^\"]*\")\\s*(v[\\d\\.]+)'''\n",
                 "req_name_group    = 1\n",
                 "req_version_group = 2\n",
                 "warn_match        = '''@(req|def)'''\n",
@@ -231,10 +232,12 @@ fn run_init(matches: &ArgMatches) {
     let extra_exclude = match matches.value_of("lang") {
         None => "",
         Some(lang) => {
+            let lang_lowercase = lang.to_ascii_lowercase();
+
             // Search for the language with the given name/abbreviation
             let matched_lang = LANG_CONFIGS
                 .iter()
-                .find(|(_, abs, _)| abs.iter().any(|&a| a == lang));
+                .find(|(_, abs, _)| abs.iter().any(|a| a.to_ascii_lowercase() == lang_lowercase));
 
             match matched_lang {
                 Some((_, _, exclude)) => exclude,
@@ -242,7 +245,7 @@ fn run_init(matches: &ArgMatches) {
                     // Print an error message with descriptive information about available
                     // languages, alongside suggestions for adding a new one.
                     eprintln!(
-                        "No language found for name '{}'. The available options are listed below:",
+                        "No matches found for language '{}'. The available options are listed below:\n",
                         lang
                     );
 
@@ -257,7 +260,7 @@ fn run_init(matches: &ArgMatches) {
                     }
 
                     eprintln!(concat!(
-                        "If you'd like to add a language, just open an issue on the repository at:",
+                        "\nIf you'd like to add a language, just open an issue on the repository at:",
                         // @req "reverse repo url" v0
                         "https://github.com/sharnoff/reverse"
                     ));
@@ -354,6 +357,23 @@ fn run(
     show_matches: bool,
     strict: bool,
 ) {
+    let mut cwd = match env::current_dir() {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("failed to get current directory: {}", e);
+            process::exit(1);
+        }
+    };
+
+    // Ensure that the path ends with a separator so that when we remove it as a prefix, 'cwd/foo'
+    // becomes 'foo', not '/foo'.
+    if !cwd.ends_with(&String::from(path::MAIN_SEPARATOR)) {
+        // PathBuf::push will replace the current path if the thing you're pushing is absolute...
+        // which means that pushing '/' will *replace* the path intead of ensuring that it ends
+        // with '/'. So instead, we push the empty string and it adds the '/' for us.
+        cwd.push("");
+    }
+
     // Step 1: Validate regexes and produce exclusion globs
 
     fn make_regex(string: &str, field: &str) -> Regex {
@@ -463,6 +483,7 @@ fn run(
         } else if meta.is_file() {
             process_file(
                 &config,
+                &cwd,
                 &def_matcher,
                 &req_matcher,
                 warn_matcher.as_ref(),
@@ -513,7 +534,7 @@ fn run(
             1 => Some((name, def_list.remove(0))),
             _ => {
                 exit = true;
-                Definition::print_conflict(&name, &def_list);
+                Definition::print_conflict(&name, &def_list, &cwd);
                 None
             }
         })
@@ -533,7 +554,7 @@ fn run(
     for req in reqs.values().flatten() {
         match sets.get_mut(&req.name) {
             None => {
-                req.print_unknown_name();
+                req.print_unknown_name(&cwd);
                 exit = true;
             }
             Some((_, ref mut reqs)) => reqs.push(req),
@@ -544,7 +565,7 @@ fn run(
     if strict {
         for (def, reqs) in sets.values() {
             if reqs.is_empty() {
-                def.print_err_no_reqs();
+                def.print_err_no_reqs(&cwd);
                 exit = true;
             }
         }
@@ -575,7 +596,7 @@ fn run(
 
         reqs.iter().for_each(|req| {
             if req.version != def.version {
-                req.print_version_mismatch(def);
+                req.print_version_mismatch(&cwd, def);
                 exit = true;
             }
         });
@@ -610,6 +631,7 @@ struct Requirement {
 // TODO: This should use a `RegexSet` instead of multiple, individual regexes.
 fn process_file(
     config: &Config,
+    cwd: &Path,
     def_matcher: &Regex,
     req_matcher: &Regex,
     warn_matcher: Option<&Regex>,
@@ -725,7 +747,7 @@ fn process_file(
                     let src = source(line, line_no, m);
                     let indent = src.required_indent();
                     let color = if strict { ERR_COLOR } else { WARN_COLOR };
-                    eprintln!("{}", src.display_with_indent(indent, color));
+                    eprintln!("{}", src.display_with_indent(cwd, indent, color));
                 }
 
                 if strict {
@@ -768,7 +790,7 @@ const WARN_COLOR: Color = Color::Yellow;
 const PASS_COLOR: Color = Color::Green;
 
 impl Definition {
-    fn print_conflict(name: &str, defs: &[Definition]) {
+    fn print_conflict(name: &str, defs: &[Definition], cwd: &Path) {
         assert!(!defs.is_empty());
 
         let indent = defs
@@ -783,7 +805,12 @@ impl Definition {
             name
         );
         for def in defs {
-            writeln!(&mut s, "{}", def.src.display_with_indent(indent, ERR_COLOR)).unwrap();
+            writeln!(
+                &mut s,
+                "{}",
+                def.src.display_with_indent(cwd, indent, ERR_COLOR)
+            )
+            .unwrap();
         }
 
         eprintln!("{}", s);
@@ -798,7 +825,7 @@ impl Definition {
 }
 
 impl Definition {
-    fn print_err_no_reqs(&self) {
+    fn print_err_no_reqs(&self, cwd: &Path) {
         let indent = self.src.required_indent();
         let indent_str = " ".repeat(indent);
 
@@ -812,7 +839,7 @@ impl Definition {
             ERR_COLOR.paint("[error]"),
             self.name,
             // 2nd line
-            self.src.display_with_indent(indent, ERR_COLOR),
+            self.src.display_with_indent(cwd, indent, ERR_COLOR),
             // 3rd line
             indent_str,
             CTX_COLOR.paint("= note:"),
@@ -821,16 +848,17 @@ impl Definition {
 }
 
 impl Requirement {
-    fn print_unknown_name(&self) {
+    fn print_unknown_name(&self, cwd: &Path) {
         eprintln!(
             "{} Unknown requirement name {:?}\n{}\n",
             ERR_COLOR.paint("[error]"),
             self.name,
-            self.src,
+            self.src
+                .display_with_indent(cwd, self.src.required_indent(), ERR_COLOR),
         );
     }
 
-    fn print_version_mismatch(&self, def: &Definition) {
+    fn print_version_mismatch(&self, cwd: &Path, def: &Definition) {
         let indent = self.src.required_indent().max(def.src.required_indent());
 
         let indent_str = " ".repeat(indent);
@@ -848,13 +876,13 @@ impl Requirement {
             def.version,
             self.version,
             // 2nd line(s)
-            self.src.display_with_indent(indent, ERR_COLOR),
+            self.src.display_with_indent(cwd, indent, ERR_COLOR),
             // 3rd line
             indent_str,
             CTX_COLOR.paint("= note:"),
             def.name,
             // 4th line(s)
-            def.src.display_with_indent(indent, ERR_COLOR),
+            def.src.display_with_indent(cwd, indent, ERR_COLOR),
         );
     }
 }
@@ -866,6 +894,7 @@ impl Source {
 
     fn display_with_indent<'a>(
         &'a self,
+        cwd: &Path,
         indent: usize,
         highlight_color: Color,
     ) -> impl 'a + Display {
@@ -926,19 +955,12 @@ impl Source {
         SourceDisplay {
             line: &self.line,
             line_no_str,
-            file_name: &self.file,
+            file_name: self.file.strip_prefix(cwd).unwrap_or(&self.file),
             indent,
             col,
             highlight_start_width,
             highlight_end_width,
             highlight_color,
         }
-    }
-}
-
-impl Display for Source {
-    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
-        self.display_with_indent(self.required_indent(), ERR_COLOR)
-            .fmt(f)
     }
 }
